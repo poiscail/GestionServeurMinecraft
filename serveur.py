@@ -17,7 +17,7 @@ def maj_joueurs(joueurs, ligne):
         joueurs.discard(m[1])
 
 
-def sauvegarder(dossier, dest=None):
+def sauvegarder(dossier, dest=None, garder=10):
     """Zippe le monde (level-name de server.properties) ; renvoie le chemin du zip."""
     monde = "world"
     props = os.path.join(dossier, "server.properties")
@@ -39,6 +39,9 @@ def sauvegarder(dossier, dest=None):
                     z.write(p, os.path.relpath(p, dossier))
                 except OSError:  # session.lock est verrouillé par le serveur
                     pass
+    anciens = sorted(glob.glob(os.path.join(dest, f"{monde}_*.zip")))
+    for vieux in anciens[:-garder]:  # ne garde que les `garder` plus récentes
+        os.remove(vieux)
     return chemin
 
 
