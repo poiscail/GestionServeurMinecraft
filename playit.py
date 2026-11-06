@@ -26,6 +26,7 @@ class Playit:
     def __init__(self, sur_ligne, sur_adresse):
         self.sur_ligne, self.sur_adresse = sur_ligne, sur_adresse
         self.proc = None
+        self.claim_ouvert = False
 
     @property
     def actif(self):
@@ -45,10 +46,13 @@ class Playit:
             l = l.rstrip()
             self.sur_ligne(l)
             if m := CLAIM.search(l):
-                webbrowser.open(m[0])  # l'utilisateur valide lui-même la liaison du compte
+                if not self.claim_ouvert:
+                    self.claim_ouvert = True
+                    webbrowser.open(m[0])  # l'utilisateur valide lui-même la liaison du compte
             elif m := ADRESSE.search(l):
                 self.sur_adresse(m[0])
 
     def arreter(self):
         if self.actif:
-            self.proc.terminate()
+            # /T : playit.exe lance un processus fils (playitd) qu'un simple terminate() laisserait tourner
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(self.proc.pid)], capture_output=True)
