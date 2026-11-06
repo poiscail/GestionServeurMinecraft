@@ -1,7 +1,11 @@
 import json, os, queue, threading, time, tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import modpack as mp
+import partage
+import playit
+import psutil
 import serveur as sv
+import veille
 
 BG, PANEL, CHAMP, FG, DIM, ACCENT = "#16181d", "#1f2229", "#292d36", "#e8eaed", "#8b909a", "#5b8def"
 VERT, ROUGE, ORANGE = "#3ddc84", "#ef5350", "#f5a623"
@@ -26,6 +30,15 @@ class App(tk.Tk):
         self.ram = tk.StringVar(value=cfg.get("ram", "2048"))
         self.auto = tk.StringVar(value=cfg.get("auto", "0"))
         self.cmd = tk.StringVar()
+        self.veille_on = tk.BooleanVar(value=cfg.get("veille", False))
+        self.idle = tk.StringVar(value=cfg.get("idle", "0"))
+        self.adresse = tk.StringVar(value=cfg.get("adresse", ""))
+        self.pack_url = tk.StringVar(value=cfg.get("pack_url", ""))
+        self.playit = playit.Playit(self.file.put, lambda a: self.file.put(("adresse", a)))
+        self.veille = None
+        self.vide_depuis = None
+        self.ps = None
+        self.n = 0
         self.historique, self.pos_h = [], 0
         self.arret_en_cours = False
         self.sauvegarde_en_cours = False
@@ -33,6 +46,8 @@ class App(tk.Tk):
         self._construire()
         self.jar.trace_add("write", lambda *_: self.maj_mods())
         self.maj_mods()
+        if cfg.get("en_ligne"):
+            self.basculer_en_ligne()
         self.protocol("WM_DELETE_WINDOW", self.fermer)
         self.after(100, self.boucle)
 
@@ -139,6 +154,43 @@ class App(tk.Tk):
         self.liste_m = self._liste(m, selectmode="extended")
         self.liste_m.pack(fill="both", expand=True)
 
+        o = ttk.Frame(self.onglets, style="Panel.TFrame", padding=16)
+        self.onglets.add(o, text="En ligne")
+        ligne = ttk.Frame(o, style="Panel.TFrame")
+        ligne.pack(fill="x")
+        self.bt_ligne = ttk.Button(ligne, text="Mettre en ligne", style="Accent.TButton", command=self.basculer_en_ligne)
+        self.bt_ligne.pack(side="left")
+        ttk.Entry(ligne, textvariable=self.adresse).pack(side="left", fill="x", expand=True, padx=8)
+        ttk.Button(ligne, text="Copier", command=self.copier).pack(side="left")
+        ttk.Label(o, text="Première fois : une page playit.gg s'ouvre, valide-y ton compte puis crée un tunnel « Minecraft Java ». Colle l'adresse ici si elle n'apparaît pas toute seule.",
+                  style="Panel.TLabel", foreground=DIM, wraplength=860).pack(anchor="w", pady=(6, 14))
+        ttk.Checkbutton(o, text="Mode veille : le serveur s'éteint et démarre quand un ami se connecte",
+                        variable=self.veille_on).pack(anchor="w")
+        f2 = ttk.Frame(o, style="Panel.TFrame")
+        f2.pack(anchor="w", pady=10)
+        ttk.Label(f2, text="Arrêt auto après", style="Panel.TLabel").pack(side="left")
+        ttk.Entry(f2, textvariable=self.idle, width=5).pack(side="left", padx=6)
+        ttk.Label(f2, text="minutes sans joueur (0 = jamais)", style="Panel.TLabel").pack(side="left")
+        f3 = ttk.Frame(o, style="Panel.TFrame")
+        f3.pack(fill="x", pady=(14, 0))
+        self.bt_part = ttk.Button(f3, text="Partager le modpack", command=self.partager)
+        self.bt_part.pack(side="left")
+        self.bt_kit = ttk.Button(f3, text="Générer le kit amis", command=self.kit)
+        self.bt_kit.pack(side="left", padx=8)
+        ttk.Entry(o, textvariable=self.pack_url).pack(fill="x", pady=(10, 0))
+        self.etat_p = ttk.Label(o, text="", style="Panel.TLabel", foreground=DIM)
+        self.etat_p.pack(anchor="w", pady=6)
+
+        e = ttk.Frame(self.onglets, style="Panel.TFrame", padding=16)
+        self.onglets.add(e, text="État")
+        self.vals = {}
+        for k in ("Serveur", "Joueurs", "CPU", "RAM", "Adresse publique", "Mode veille"):
+            r = ttk.Frame(e, style="Panel.TFrame")
+            r.pack(fill="x", pady=3)
+            ttk.Label(r, text=k, style="Panel.TLabel", foreground=DIM, width=18).pack(side="left")
+            self.vals[k] = ttk.Label(r, text="—", style="Panel.TLabel")
+            self.vals[k].pack(side="left")
+
     # ---------- utilitaires ----------
     def _charger(self):
         try:
@@ -148,7 +200,9 @@ class App(tk.Tk):
 
     def _enregistrer(self):
         try:
-            json.dump({"java": self.java.get(), "jar": self.jar.get(), "ram": self.ram.get(), "auto": self.auto.get()},
+            json.dump({"java": self.java.get(), "jar": self.jar.get(), "ram": self.ram.get(), "auto": self.auto.get(),
+                       "veille": self.veille_on.get(), "idle": self.idle.get(), "adresse": self.adresse.get(),
+                       "pack_url": self.pack_url.get(), "en_ligne": self.playit.actif},
                       open(CONFIG, "w", encoding="utf-8"))
         except OSError:
             pass
@@ -177,15 +231,78 @@ class App(tk.Tk):
             self.arret_en_cours = True
             self.log("[Arrêt en cours…]")
             threading.Thread(target=self.srv.arreter, daemon=True).start()
-        elif os.path.isfile(self.jar.get()) and self.ram.get().isdigit() and int(self.ram.get()) >= 512:
+        else:
+            self.demarrer_serveur()
+
+    def demarrer_serveur(self, silencieux=False):
+        if os.path.isfile(self.jar.get()) and self.ram.get().isdigit() and int(self.ram.get()) >= 512:
             self._enregistrer()
+            if self.veille:
+                self.veille.fermer()  # libère le port pour le serveur
             try:
                 self.srv.demarrer(self.java.get(), self.jar.get(), int(self.ram.get()))
                 self.reset_auto()
             except OSError as ex:
-                messagebox.showerror("Erreur", f"Impossible de lancer Java :\n{ex}")
-        else:
+                msg = f"Impossible de lancer Java : {ex}"
+                self.log("[" + msg + "]") if silencieux else messagebox.showerror("Erreur", msg)
+        elif not silencieux:
             messagebox.showerror("Erreur", "Choisis un .jar existant et une RAM d'au moins 512 Mo.")
+
+    def copier(self):
+        self.clipboard_clear()
+        self.clipboard_append(self.adresse.get())
+
+    def basculer_en_ligne(self):
+        if self.playit.actif:
+            self.playit.arreter()
+            return
+
+        def go():
+            try:
+                self.playit.demarrer()
+            except Exception as ex:
+                self.file.put(f"[playit] Échec : {ex}")
+        threading.Thread(target=go, daemon=True).start()
+
+    def info_modpack(self):
+        try:
+            return json.load(open(os.path.join(self.dossier(), "modpack_info.json")))
+        except (OSError, ValueError, TypeError):
+            messagebox.showerror("Erreur", "Importe d'abord un modpack (version de Minecraft et loader inconnus).")
+
+    def partager(self):
+        info = self.info_modpack()
+        if info and messagebox.askyesno("Partager", "Publier la liste de mods dans un dépôt GitHub PUBLIC (ModpackServeur) sur ton compte ?"):
+            self.bt_part.config(state="disabled")
+            self.etat_p.config(text="Génération du pack…")
+            threading.Thread(target=self._partager, args=(self.dossier(), info), daemon=True).start()
+
+    def _partager(self, dossier, info):
+        try:
+            sortie = os.path.join(dossier, "pack_partage")
+            os.makedirs(sortie, exist_ok=True)
+            n, manquants = partage.generer_pack(dossier, sortie, "Serveur Minecraft", info["mc"], info["loader"], info["loader_version"])
+            url = partage.publier(sortie)
+            msg = f"{n} mod(s) partagé(s)" + (f", introuvables sur Modrinth (ignorés) : {', '.join(manquants)}" if manquants else "")
+            self.file.put(("partage", msg, url))
+        except Exception as ex:
+            self.file.put(("partage", f"Échec : {ex}", None))
+
+    def kit(self):
+        info = self.info_modpack()
+        if info and not (self.pack_url.get() and self.adresse.get()):
+            messagebox.showerror("Erreur", "Il faut l'adresse publique (mise en ligne) et l'URL du pack (partage du modpack).")
+        elif info:
+            self.bt_kit.config(state="disabled")
+            self.etat_p.config(text="Création du kit…")
+            threading.Thread(target=self._kit, args=(self.dossier(), info, self.pack_url.get(), self.adresse.get()), daemon=True).start()
+
+    def _kit(self, dossier, info, url, adresse):
+        try:
+            z = partage.generer_kit(dossier, "Serveur Minecraft", info["mc"], info["loader"], info["loader_version"], url, adresse, self.file.put)
+            self.file.put(("kit", f"Kit prêt : {z}", z))
+        except Exception as ex:
+            self.file.put(("kit", f"Échec : {ex}", None))
 
     def envoyer(self, _):
         t = self.cmd.get().strip()
@@ -296,6 +413,19 @@ class App(tk.Tk):
                 x = self.file.get_nowait()
                 if isinstance(x, tuple) and x[0] == "modpack":
                     self.fin_modpack(x[1], x[2])
+                elif isinstance(x, tuple) and x[0] == "adresse":
+                    self.adresse.set(x[1])
+                elif isinstance(x, tuple) and x[0] == "reveil":
+                    if not self.srv.actif:
+                        self.log("[Veille] Un joueur se connecte : démarrage du serveur")
+                        self.demarrer_serveur(True)
+                elif isinstance(x, tuple) and x[0] in ("partage", "kit"):
+                    (self.bt_part if x[0] == "partage" else self.bt_kit).config(state="normal")
+                    self.etat_p.config(text=x[1])
+                    if x[0] == "partage" and x[2]:
+                        self.pack_url.set(x[2])
+                    if x[0] == "kit" and x[2]:
+                        os.startfile(os.path.dirname(x[2]))
                 elif isinstance(x, tuple):
                     self.sauvegarde_en_cours = False
                     self.bt_sauv.config(state="normal")
@@ -322,10 +452,57 @@ class App(tk.Tk):
             for j in joueurs:
                 self.liste_j.insert("end", j)
         self.nb_joueurs.config(text=f"{len(joueurs)} joueur(s)" if actif else "")
+        self.gerer_veille(actif, joueurs)
+        self.n += 1
+        if self.n % 5 == 0:
+            self.maj_etat(actif, joueurs)
         if self.prochaine_auto and time.time() >= self.prochaine_auto:
             self.reset_auto()
             self.sauvegarde()
         self.after(200, self.boucle)
+
+    def gerer_veille(self, actif, joueurs):
+        dossier = self.dossier()
+        if self.veille_on.get() and not actif and dossier and os.path.isfile(self.jar.get()):
+            if not (self.veille and self.veille.active):
+                try:
+                    self.veille = veille.Veille(sv.port(dossier), lambda: self.file.put(("reveil",)))
+                    self.veille.ouvrir()
+                except OSError as ex:
+                    self.veille_on.set(False)
+                    self.log(f"[Veille impossible : port occupé ({ex})]")
+        elif self.veille and self.veille.active:
+            self.veille.fermer()
+        mn = int(self.idle.get()) if self.idle.get().isdigit() else 0
+        if actif and self.srv.pret and not joueurs and not self.arret_en_cours:
+            self.vide_depuis = self.vide_depuis or time.time()
+            if mn and time.time() - self.vide_depuis > mn * 60:
+                self.log(f"[Arrêt auto : personne depuis {mn} min]")
+                self.vide_depuis = None
+                self.basculer()
+        else:
+            self.vide_depuis = None
+
+    def maj_etat(self, actif, joueurs):
+        v = self.vals
+        v["Serveur"].config(text="En ligne" if actif else "Hors ligne", foreground=VERT if actif else ROUGE)
+        v["Joueurs"].config(text=", ".join(joueurs) if joueurs else "Aucun")
+        if actif:
+            if not self.ps or self.ps.pid != self.srv.proc.pid:
+                self.ps = psutil.Process(self.srv.proc.pid)
+                self.ps.cpu_percent(None)
+            try:
+                v["CPU"].config(text=f"{self.ps.cpu_percent(None) / psutil.cpu_count():.0f} %")
+                v["RAM"].config(text=f"{self.ps.memory_info().rss // 2**20} Mo")
+            except psutil.Error:
+                pass
+        else:
+            v["CPU"].config(text="—")
+            v["RAM"].config(text="—")
+        v["Adresse publique"].config(text=self.adresse.get() or "—")
+        v["Mode veille"].config(text="À l'écoute" if self.veille and self.veille.active else "Inactif")
+        self.bt_ligne.config(text="Mettre hors ligne" if self.playit.actif else "Mettre en ligne",
+                             style="Stop.TButton" if self.playit.actif else "Accent.TButton")
 
     def fermer(self):
         if self.srv.actif:
@@ -335,6 +512,9 @@ class App(tk.Tk):
             self.update()
             self.srv.arreter()
         self._enregistrer()
+        self.playit.arreter()
+        if self.veille:
+            self.veille.fermer()
         self.destroy()
 
 

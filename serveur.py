@@ -26,6 +26,15 @@ def nom_monde(dossier):
     return "world"
 
 
+def port(dossier):
+    props = os.path.join(dossier, "server.properties")
+    if os.path.exists(props):
+        for l in open(props, encoding="utf-8"):
+            if l.startswith("server-port=") and l.split("=", 1)[1].strip().isdigit():
+                return int(l.split("=", 1)[1])
+    return 25565
+
+
 def sauvegarder(dossier, dest=None, garder=10):
     """Zippe le monde (level-name de server.properties) ; renvoie le chemin du zip."""
     monde = nom_monde(dossier)
@@ -69,6 +78,7 @@ class Serveur:
         self.sur_ligne = sur_ligne
         self.proc = None
         self.joueurs = set()
+        self.pret = False  # vrai une fois le monde chargé ("Done")
 
     @property
     def actif(self):
@@ -78,6 +88,7 @@ class Serveur:
         if self.actif:
             return
         self.joueurs.clear()
+        self.pret = False
         self.proc = subprocess.Popen(
             [java, f"-Xmx{ram_mo}M", f"-Xms{ram_mo}M", "-jar", jar, "nogui"],
             cwd=os.path.dirname(jar), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -88,6 +99,7 @@ class Serveur:
     def _lire(self, proc):
         for ligne in proc.stdout:
             maj_joueurs(self.joueurs, ligne)
+            self.pret = self.pret or "Done (" in ligne
             self.sur_ligne(ligne.rstrip())
         self.joueurs.clear()
         self.sur_ligne("[Serveur arrêté]")

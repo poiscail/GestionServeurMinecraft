@@ -1,7 +1,10 @@
 import os, tempfile, zipfile
 import json
 import modpack as mp
+import partage
 import serveur as sv
+import socket
+import veille
 
 
 def test_joueurs():
@@ -72,10 +75,53 @@ def test_zip_de_mods():
     assert mp.installer(p, d)["installes"] == 1 and sv.lister_mods(d) == ["a.jar"]
 
 
+def _poignee(etat, port):
+    corps = b"\x00" + veille._encode(767) + veille._chaine("localhost") + port.to_bytes(2, "big") + bytes([etat])
+    return veille._encode(len(corps)) + corps
+
+
+def test_veille_ping_et_reveil():
+    reveils = []
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    v = veille.Veille(port, lambda: reveils.append(1))
+    v.ouvrir()
+    try:
+        c = socket.create_connection(("127.0.0.1", port), timeout=5)
+        c.sendall(_poignee(1, port) + b"\x01\x00")
+        rep = veille._lire_paquet(c)
+        assert b"veille" in rep and not reveils
+        c.close()
+        c = socket.create_connection(("127.0.0.1", port), timeout=5)
+        c.sendall(_poignee(2, port) + veille._paquet(0, veille._chaine("Bob")))
+        assert b"marre" in veille._lire_paquet(c)
+        c.close()
+        for _ in range(50):
+            if reveils:
+                break
+            import time; time.sleep(0.1)
+        assert reveils and v.demarrage
+    finally:
+        v.fermer()
+
+
+def test_pack_vide_et_servers_dat():
+    d = tempfile.mkdtemp()
+    n, manquants = partage.generer_pack(d, d, "T", "1.21.1", "fabric", "0.16.14")
+    pack = open(os.path.join(d, "pack.toml"), encoding="utf-8").read()
+    assert n == 0 and 'fabric = "0.16.14"' in pack and 'minecraft = "1.21.1"' in pack
+    dat = partage.servers_dat("Nom", "a.joinmc.link")
+    assert b"servers" in dat and b"a.joinmc.link" in dat and dat[-2:] == b"\x00\x00"
+
+
 if __name__ == "__main__":
     test_joueurs()
     test_sauvegarde_et_mods()
     test_rotation()
     test_modpack_hors_ligne()
     test_zip_de_mods()
+    test_veille_ping_et_reveil()
+    test_pack_vide_et_servers_dat()
     print("OK")

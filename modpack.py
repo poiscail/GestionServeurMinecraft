@@ -132,6 +132,8 @@ def installer(chemin, dossier, log=print):
                     if dest and not os.path.exists(dest):
                         _ecrire(dest, z.read(n))
                         info["installes"] += 1
+    if info["mc"] and info["loader"]:  # mémorisé pour le partage et le kit
+        json.dump(info, open(os.path.join(dossier, "modpack_info.json"), "w"))
     return info
 
 
