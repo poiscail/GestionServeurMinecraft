@@ -1,5 +1,6 @@
 import json, os, queue, threading, time, tkinter as tk
 from tkinter import filedialog, messagebox, ttk
+import modpack as mp
 import serveur as sv
 
 BG, PANEL, CHAMP, FG, DIM, ACCENT = "#16181d", "#1f2229", "#292d36", "#e8eaed", "#8b909a", "#5b8def"
@@ -133,6 +134,8 @@ class App(tk.Tk):
         bm.pack(side="bottom", fill="x", pady=(10, 0))
         ttk.Button(bm, text="Ajouter…", command=self.ajouter_mod).pack(side="left")
         ttk.Button(bm, text="Retirer", command=self.retirer_mod).pack(side="left", padx=8)
+        self.bt_pack = ttk.Button(bm, text="Importer un modpack…", command=self.importer_modpack)
+        self.bt_pack.pack(side="right")
         self.liste_m = self._liste(m, selectmode="extended")
         self.liste_m.pack(fill="both", expand=True)
 
@@ -244,12 +247,56 @@ class App(tk.Tk):
                 sv.retirer_mod(self.dossier(), n)
             self.maj_mods()
 
+    def importer_modpack(self):
+        if not self.dossier():
+            return messagebox.showerror("Erreur", "Choisis d'abord le .jar du serveur.")
+        if self.srv.actif:
+            return messagebox.showerror("Erreur", "Arrête le serveur avant d'importer un modpack.")
+        p = filedialog.askopenfilename(filetypes=[("Modpack", "*.mrpack *.zip")])
+        if not p:
+            return
+        self.bt_pack.config(state="disabled")
+        self.onglets.select(0)
+        self.log(f"[Modpack] Import de {os.path.basename(p)}…")
+        threading.Thread(target=self._importer, args=(p, self.dossier()), daemon=True).start()
+
+    def _importer(self, chemin, dossier):
+        try:
+            self.file.put(("modpack", mp.installer(chemin, dossier, self.file.put), dossier))
+        except Exception as ex:
+            self.file.put(("modpack", ex, dossier))
+
+    def fin_modpack(self, info, dossier):
+        self.bt_pack.config(state="normal")
+        self.maj_mods()
+        if isinstance(info, Exception):
+            return messagebox.showerror("Modpack", f"Échec de l'import :\n{info}")
+        l = [f"{info['installes']} mod(s) installé(s), {info['ignores']} client-only ignoré(s), {info['overrides']} fichier(s) de config copié(s)."]
+        if info["echecs"]:
+            l.append(f"{len(info['echecs'])} échec(s) :\n" + "\n".join(info["echecs"][:8]))
+        if info.get("sauvegarde_mods"):
+            l.append("Ancien dossier mods sauvegardé dans sauvegardes/.")
+        if info["loader"]:
+            l.append(f"Requis : {info['loader']} {info['loader_version']} pour Minecraft {info['mc']}.")
+        self.log("[Modpack] " + " ".join(l[:1]))
+        if info["loader"] == "fabric" and info["mc"] and messagebox.askyesno(
+                "Modpack", "\n".join(l) + "\n\nTélécharger le serveur Fabric correspondant et l'utiliser ?"):
+            try:
+                self.jar.set(os.path.normpath(mp.installer_fabric(dossier, info["mc"], info["loader_version"])))
+                self.log("[Modpack] Serveur Fabric prêt : fabric-server-launch.jar")
+            except Exception as ex:
+                messagebox.showerror("Fabric", f"Téléchargement impossible :\n{ex}")
+        else:
+            messagebox.showinfo("Modpack", "\n".join(l))
+
     # ---------- boucle ----------
     def boucle(self):
         try:
             while True:
                 x = self.file.get_nowait()
-                if isinstance(x, tuple):
+                if isinstance(x, tuple) and x[0] == "modpack":
+                    self.fin_modpack(x[1], x[2])
+                elif isinstance(x, tuple):
                     self.sauvegarde_en_cours = False
                     self.bt_sauv.config(state="normal")
                     self.etat_b.config(text=x[1])

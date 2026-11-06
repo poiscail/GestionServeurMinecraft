@@ -1,4 +1,6 @@
 import os, tempfile, zipfile
+import json
+import modpack as mp
 import serveur as sv
 
 
@@ -35,8 +37,45 @@ def test_rotation():
     assert len(os.listdir(dest)) == 2 and "world_20000101_000000.zip" not in os.listdir(dest)
 
 
+def test_modpack_hors_ligne():
+    d = tempfile.mkdtemp()
+    os.makedirs(os.path.join(d, "mods"))
+    open(os.path.join(d, "mods", "vieux.jar"), "w").write("v")
+    os.makedirs(os.path.join(d, "world"))
+    open(os.path.join(d, "world", "level.dat"), "w").write("garde")
+    open(os.path.join(d, "config.txt"), "w").write("garde")
+    idx = {"dependencies": {"minecraft": "1.21.1", "fabric-loader": "0.16.0"},
+           "files": [{"path": "mods/client.jar", "env": {"server": "unsupported"}, "downloads": []},
+                     {"path": "mods/mauvais.jar", "downloads": ["https://evil.example/x.jar"]}]}
+    pack = os.path.join(d, "p.mrpack")
+    with zipfile.ZipFile(pack, "w") as z:
+        z.writestr("modrinth.index.json", json.dumps(idx))
+        z.writestr("overrides/config.txt", "ecrase")
+        z.writestr("overrides/nouveau.txt", "ok")
+        z.writestr("overrides/world/level.dat", "ecrase")
+        z.writestr("overrides/../../evasion.txt", "x")
+    info = mp.installer(pack, d)
+    assert (info["mc"], info["loader"], info["ignores"], info["overrides"]) == ("1.21.1", "fabric", 1, 1)
+    assert len(info["echecs"]) == 1  # hôte non autorisé
+    assert open(os.path.join(d, "config.txt")).read() == "garde"
+    assert open(os.path.join(d, "world", "level.dat")).read() == "garde"
+    assert not os.path.exists(os.path.join(os.path.dirname(d), "evasion.txt"))
+    assert zipfile.ZipFile(info["sauvegarde_mods"]).namelist() == ["vieux.jar"]
+
+
+def test_zip_de_mods():
+    d = tempfile.mkdtemp()
+    p = os.path.join(d, "m.zip")
+    with zipfile.ZipFile(p, "w") as z:
+        z.writestr("dossier/a.jar", "x")
+        z.writestr("lisez.txt", "x")
+    assert mp.installer(p, d)["installes"] == 1 and sv.lister_mods(d) == ["a.jar"]
+
+
 if __name__ == "__main__":
     test_joueurs()
     test_sauvegarde_et_mods()
     test_rotation()
+    test_modpack_hors_ligne()
+    test_zip_de_mods()
     print("OK")

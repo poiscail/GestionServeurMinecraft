@@ -17,14 +17,18 @@ def maj_joueurs(joueurs, ligne):
         joueurs.discard(m[1])
 
 
-def sauvegarder(dossier, dest=None, garder=10):
-    """Zippe le monde (level-name de server.properties) ; renvoie le chemin du zip."""
-    monde = "world"
+def nom_monde(dossier):
     props = os.path.join(dossier, "server.properties")
     if os.path.exists(props):
         for l in open(props, encoding="utf-8"):
             if l.startswith("level-name="):
-                monde = l.split("=", 1)[1].strip()
+                return l.split("=", 1)[1].strip()
+    return "world"
+
+
+def sauvegarder(dossier, dest=None, garder=10):
+    """Zippe le monde (level-name de server.properties) ; renvoie le chemin du zip."""
+    monde = nom_monde(dossier)
     src = os.path.join(dossier, monde)
     if not os.path.isdir(src):
         raise FileNotFoundError(f"Monde introuvable : {src}")
